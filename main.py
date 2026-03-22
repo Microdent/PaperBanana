@@ -82,6 +82,12 @@ async def main():
         default="",
         help="main model name to use (default: "")",
     )
+    parser.add_argument(
+        "--image_gen_model_name",
+        type=str,
+        default="",
+        help="image generation model name to use (default: "")",
+    )
     args = parser.parse_args()
 
     exp_config = config.ExpConfig(
@@ -92,6 +98,7 @@ async def main():
         retrieval_setting=args.retrieval_setting,
         max_critic_rounds=args.max_critic_rounds,
         main_model_name=args.main_model_name,
+        image_gen_model_name=args.image_gen_model_name,
         work_dir=Path(__file__).parent,
     )
     
