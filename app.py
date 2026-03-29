@@ -172,7 +172,7 @@ async def refine_image_with_nanoviz(image_bytes, edit_prompt, aspect_ratio="21:9
         except Exception as e:
             print(f"OpenRouter refine failed: {e}, falling back...")
 
-    # Path 2 & 3: Gemini native SDK
+    # Path 2 & 3: Gemini native SDK (Google API key or Vertex AI)
     try:
         from google import genai
         from google.genai import types
@@ -190,7 +190,11 @@ async def refine_image_with_nanoviz(image_bytes, edit_prompt, aspect_ratio="21:9
         client = genai.Client(vertexai=True, project=project_id, location=location)
         via = "Vertex AI"
     else:
-        return None, "Error: No API credentials configured."
+        return None, (
+            "Error: No API credentials configured. "
+            "Set OPENROUTER_API_KEY, GOOGLE_API_KEY, or GOOGLE_CLOUD_PROJECT "
+            "(or google_cloud.project_id in configs/model_config.yaml)."
+        )
 
     try:
         contents = [
@@ -488,10 +492,11 @@ def build_app():
         # ================================================================
         # API KEYS ACCORDION
         # ================================================================
-        with gr.Accordion("API Keys", open=False):
+        with gr.Accordion("API & Cloud Settings", open=False):
             gr.Markdown(
-                "**You do not need both keys.** Fill **at least one**: **OpenRouter** *or* **Google (Gemini)**. "
-                "If both are set, OpenRouter is preferred for automatic routing when available."
+                "**You only need one credential source.** Fill **at least one**: **OpenRouter**, "
+                "**Google (Gemini) API key**, or **Vertex AI project settings**. "
+                "If OpenRouter and Gemini/Vertex are both configured, OpenRouter is preferred for automatic routing when available."
             )
             with gr.Row():
                 openrouter_key_input = gr.Textbox(
@@ -502,25 +507,51 @@ def build_app():
                     label="Google API Key (optional)", type="password", placeholder="AIza...",
                     value=get_config_val("api_keys", "google_api_key", "GOOGLE_API_KEY", ""),
                 )
-            gr.Markdown("*Keys are used only for this session and never stored.*")
+            with gr.Row():
+                vertex_project_input = gr.Textbox(
+                    label="Vertex AI Project ID (optional)",
+                    placeholder="your-gcp-project-id",
+                    value=get_config_val("google_cloud", "project_id", "GOOGLE_CLOUD_PROJECT", ""),
+                )
+                vertex_location_input = gr.Textbox(
+                    label="Vertex AI Location (optional)",
+                    placeholder="global",
+                    value=get_config_val("google_cloud", "location", "GOOGLE_CLOUD_LOCATION", "global"),
+                )
+            gr.Markdown(
+                "*Credentials are used only for this session and never stored. "
+                "Vertex AI still requires Application Default Credentials or "
+                "`GOOGLE_APPLICATION_CREDENTIALS` in the runtime environment.*"
+            )
 
-            def apply_keys(or_key, g_key):
-                if or_key:
-                    os.environ["OPENROUTER_API_KEY"] = or_key
-                if g_key:
-                    os.environ["GOOGLE_API_KEY"] = g_key
+            def _set_or_clear_env(var_name, value):
+                value = (value or "").strip()
+                if value:
+                    os.environ[var_name] = value
+                else:
+                    os.environ.pop(var_name, None)
+
+            def apply_credentials(or_key, g_key, vertex_project, vertex_location):
+                _set_or_clear_env("OPENROUTER_API_KEY", or_key)
+                _set_or_clear_env("GOOGLE_API_KEY", g_key)
+                _set_or_clear_env("GOOGLE_CLOUD_PROJECT", vertex_project)
+                _set_or_clear_env("GOOGLE_CLOUD_LOCATION", vertex_location)
                 from utils.generation_utils import reinitialize_clients
                 initialized = reinitialize_clients()
                 if initialized:
                     return f"Clients initialized: {', '.join(initialized)}."
                 return (
                     "Warning: no API clients could be initialized. "
-                    "Enter at least one key—OpenRouter or Google (Gemini)."
+                    "Enter at least one credential source—OpenRouter, Google (Gemini), or Vertex AI."
                 )
 
-            apply_keys_btn = gr.Button("Apply Keys", size="sm")
+            apply_keys_btn = gr.Button("Apply Credentials", size="sm")
             keys_status = gr.Textbox(visible=False)
-            apply_keys_btn.click(apply_keys, inputs=[openrouter_key_input, google_key_input], outputs=[keys_status])
+            apply_keys_btn.click(
+                apply_credentials,
+                inputs=[openrouter_key_input, google_key_input, vertex_project_input, vertex_location_input],
+                outputs=[keys_status],
+            )
 
         # ================================================================
         # TABS

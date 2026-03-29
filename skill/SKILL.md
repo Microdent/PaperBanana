@@ -6,6 +6,8 @@ dependencies:
   env:
     - OPENROUTER_API_KEY (recommended)
     - GOOGLE_API_KEY (alternative)
+    - GOOGLE_CLOUD_PROJECT (alternative to GOOGLE_API_KEY)
+    - GOOGLE_CLOUD_LOCATION (optional; defaults to global)
   runtime:
     - python3
     - uv
@@ -34,7 +36,18 @@ export OPENROUTER_API_KEY="sk-or-v1-..."
 export GOOGLE_API_KEY="your-key-here"
 ```
 
-If both keys are configured, OpenRouter is used by default.
+**Option 3: Vertex AI** — Gemini via your GCP project:
+```bash
+export GOOGLE_CLOUD_PROJECT="your-gcp-project-id"
+export GOOGLE_CLOUD_LOCATION="global"  # optional
+
+# authenticate with one of:
+gcloud auth application-default login
+# or
+export GOOGLE_APPLICATION_CREDENTIALS="/path/to/service-account.json"
+```
+
+If multiple providers are configured, OpenRouter is used by default. Gemini can run through either Google API key or Vertex AI.
 
 ## Usage
 
@@ -59,7 +72,7 @@ python skill/run.py \
 | `--max-critic-rounds` | No | `3` | Maximum critic refinement iterations |
 | `--num-candidates` | No | `10` | Number of parallel candidates to generate |
 | `--retrieval-setting` | No | `auto` | Retrieval mode: `auto`, `manual`, `random`, or `none` |
-| `--main-model-name` | No | `gemini-3.1-pro-preview` | Main model for VLM agents. Provider auto-detected from configured API key |
+| `--main-model-name` | No | `gemini-3.1-pro-preview` | Main model for VLM agents. Provider auto-detected from configured credentials |
 | `--image-gen-model-name` | No | `gemini-3.1-flash-image-preview` | Model for image generation. Also supports `gemini-3-pro-image-preview` |
 | `--exp-mode` | No | `demo_full` | Pipeline: `demo_full` (with Stylist) or `demo_planner_critic` (without Stylist) |
 
@@ -99,4 +112,3 @@ PaperBanana is based on the **PaperVizAgent** framework, a reference-driven mult
 > arXiv:2601.23265
 
 The framework introduces a collaborative team of five specialized agents — Retriever, Planner, Stylist, Visualizer, and Critic — to transform raw scientific content into publication-quality diagrams. Evaluation is conducted on the **PaperBananaBench** benchmark.
-

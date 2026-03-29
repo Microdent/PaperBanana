@@ -40,15 +40,49 @@ from pathlib import Path
 # Load config
 config_path = Path(__file__).parent.parent / "configs" / "model_config.yaml"
 model_config = {}
-if config_path.exists():
-    with open(config_path, "r", encoding="utf-8-sig") as f:
-        model_config = yaml.safe_load(f) or {}
+
+
+def load_model_config():
+    """Reload model config from disk so runtime credential updates are visible."""
+    global model_config
+    if config_path.exists():
+        with open(config_path, "r", encoding="utf-8-sig") as f:
+            model_config = yaml.safe_load(f) or {}
+    else:
+        model_config = {}
+    return model_config
+
+
+load_model_config()
 
 def get_config_val(section, key, env_var, default=""):
     val = os.getenv(env_var)
     if not val and section in model_config:
         val = model_config[section].get(key)
     return val or default
+
+
+def get_vertex_ai_config():
+    """Return Vertex AI project/location from env or config."""
+    project_id = get_config_val("google_cloud", "project_id", "GOOGLE_CLOUD_PROJECT", "")
+    location = get_config_val("google_cloud", "location", "GOOGLE_CLOUD_LOCATION", "global")
+    return project_id, location
+
+
+def initialize_gemini_client():
+    """Initialize Gemini using either Google API key or Vertex AI credentials."""
+    api_key = get_config_val("api_keys", "google_api_key", "GOOGLE_API_KEY", "")
+    if api_key:
+        return genai.Client(api_key=api_key), "Gemini (Google API key)"
+
+    project_id, location = get_vertex_ai_config()
+    if project_id:
+        return (
+            genai.Client(vertexai=True, project=project_id, location=location),
+            f"Gemini (Vertex AI: {project_id}/{location})",
+        )
+
+    return None, ""
 
 # Initialize clients lazily or with robust defaults
 gemini_client = None
@@ -71,13 +105,12 @@ def reinitialize_clients():
 
     initialized = []
 
-    api_key = get_config_val("api_keys", "google_api_key", "GOOGLE_API_KEY", "")
-    if api_key:
-        gemini_client = genai.Client(api_key=api_key)
-        print("Initialized Gemini Client with API Key")
-        initialized.append("Gemini")
-    else:
-        gemini_client = None
+    load_model_config()
+
+    gemini_client, gemini_label = initialize_gemini_client()
+    if gemini_client is not None:
+        print(f"Initialized {gemini_label}")
+        initialized.append(gemini_label)
 
     key = get_config_val("api_keys", "anthropic_api_key", "ANTHROPIC_API_KEY", "")
     if key:
@@ -150,8 +183,9 @@ async def call_gemini_with_retry_async(
     """
     if gemini_client is None:
         raise RuntimeError(
-            "Gemini client was not initialized: missing Google API key. "
-            "Please set GOOGLE_API_KEY in environment, or configure api_keys.google_api_key in configs/model_config.yaml."
+            "Gemini client was not initialized: missing Google API key or Vertex AI project configuration. "
+            "Please set GOOGLE_API_KEY, or configure GOOGLE_CLOUD_PROJECT / GOOGLE_CLOUD_LOCATION "
+            "(or google_cloud.project_id / google_cloud.location in configs/model_config.yaml)."
         )
 
     result_list = []
@@ -754,7 +788,7 @@ async def call_model_with_retry_async(
     Routing rules:
       1. Explicit prefix overrides: "openrouter/" -> OpenRouter, "claude-" -> Anthropic,
          "gpt-"/"o1-"/"o3-"/"o4-" -> OpenAI
-      2. No prefix: auto-detect based on which API key is configured.
+      2. No prefix: auto-detect based on which credentials are configured.
          Priority: OpenRouter > Gemini > Anthropic > OpenAI
     """
     # Explicit provider prefix overrides auto-detection
@@ -781,8 +815,9 @@ async def call_model_with_retry_async(
             provider = "openai"
         else:
             raise RuntimeError(
-                "No API client available. Please configure at least one API key "
-                "in configs/model_config.yaml or via environment variables."
+                "No API client available. Please configure at least one credential source "
+                "(OpenRouter, Gemini via GOOGLE_API_KEY, Gemini via Vertex AI / GOOGLE_CLOUD_PROJECT, "
+                "Anthropic, or OpenAI) in configs/model_config.yaml or via environment variables."
             )
 
     if provider == "gemini":

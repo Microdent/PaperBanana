@@ -53,11 +53,35 @@ cd PaperBanana
 ```
 
 ### Step2: Configuration
-PaperBanana supports configuring API keys from a YAML configuration file or via environment variables. 
+PaperBanana supports configuring credentials from a YAML configuration file or via environment variables.
 
-We recommend duplicate the `configs/model_config.template.yaml` file into `configs/model_config.yaml` to externalize all user configurations. This file is ignored by git to keep your api keys and configurations secret. In `model_config.yaml`, remember to fill in the two model names (`defaults.main_model_name` and `defaults.image_gen_model_name`) and set **at least one** API key under `api_keys`—for example only `google_api_key` (Gemini), or only `openrouter_api_key` (OpenRouter). **You do not need both; either one is enough.** If both are configured, OpenRouter is preferred for routing when available.
+We recommend duplicate the `configs/model_config.template.yaml` file into `configs/model_config.yaml` to externalize all user configurations. This file is ignored by git to keep your credentials and configurations secret. In `model_config.yaml`, remember to fill in the two model names (`defaults.main_model_name` and `defaults.image_gen_model_name`) and configure **at least one** credential source:
 
-Note that if you need to generate many candidates simultaneously, you will require an API key that supports high concurrency.
+- `api_keys.openrouter_api_key` for OpenRouter
+- `api_keys.google_api_key` for Gemini via Google API
+- `google_cloud.project_id` for Gemini via Vertex AI
+
+If multiple providers are configured, OpenRouter is preferred for automatic routing when available.
+
+Example Vertex AI config:
+```yaml
+google_cloud:
+  project_id: "your-gcp-project-id"
+  location: "global"
+```
+
+Environment-variable equivalent:
+```bash
+export GOOGLE_CLOUD_PROJECT="your-gcp-project-id"
+export GOOGLE_CLOUD_LOCATION="global"   # optional, defaults to global
+
+# Authenticate with one of:
+gcloud auth application-default login
+# or
+export GOOGLE_APPLICATION_CREDENTIALS="/path/to/service-account.json"
+```
+
+Note that if you need to generate many candidates simultaneously, you will require a credential source with sufficient concurrency quota.
 
 ### Step3: Downloading the Dataset
 First download [PaperBananaBench](https://huggingface.co/datasets/dwzhu/PaperBananaBench), then place it under the `data` directory (e.g., `data/PaperBananaBench/`). The framework is designed to function gracefully without the dataset by bypassing the Retriever Agent's few-shot learning capability. If interested in the original PDFs, please download them from [PaperBananaDiagramPDFs](https://huggingface.co/datasets/dwzhu/PaperBananaDiagramPDFs).
@@ -88,7 +112,7 @@ First download [PaperBananaBench](https://huggingface.co/datasets/dwzhu/PaperBan
 **Try it online — no setup required:**  
 👉 **[PaperBanana on Hugging Face Spaces](https://huggingface.co/spaces/dwzhu/PaperBanana)**
 
-To get started, enter your API key (OpenRouter or Google Gemini), then configure your desired parameters (pipeline mode, number of candidates, aspect ratio, etc.), paste your method section text and figure caption, and click **Generate**.
+To get started, enter your credential source (OpenRouter API key, Google Gemini API key, or Vertex AI project settings), then configure your desired parameters (pipeline mode, number of candidates, aspect ratio, etc.), paste your method section text and figure caption, and click **Generate**.
 
 You can also run the Gradio app locally:
 ```bash
@@ -100,6 +124,8 @@ The easiest way to launch PaperBanana is via the interactive Streamlit demo:
 ```bash
 streamlit run demo.py
 ```
+
+The Streamlit sidebar also supports OpenRouter, Google API key, and Vertex AI project configuration for the full pipeline.
 
 The web interface provides two main workflows:
 
@@ -308,5 +334,4 @@ If you find this repo helpful, please cite our paper as follows:
 This is not an officially supported Google product. This project is not eligible for the [Google Open Source Software Vulnerability Rewards Program](https://bughunters.google.com/open-source-security).
 
 Our goal is simply to benefit the community, so currently we have no plans to use it for commercial purposes. The core methodology was developed during my internship at Google, and patents have been filed for these specific workflows by Google. While this doesn't impact open-source research efforts, it restricts third-party commercial applications using similar logic.
-
 

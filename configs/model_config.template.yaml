@@ -19,9 +19,14 @@ defaults:
   main_model_name: "gemini-3.1-pro-preview"
   image_gen_model_name: "gemini-3.1-flash-image-preview"
   
-# API Keys. If you are using all gemini models, you can leave the other keys empty.
+# API Keys. For Gemini, you can use either google_api_key OR the Vertex AI config below.
 api_keys:
-  google_api_key: "" # e.g. "xxxxxxxxxxxxx"
+  google_api_key: "" # e.g. "xxxxxxxxxxxxx". Optional if using Vertex AI.
   openai_api_key: ""
   anthropic_api_key: ""
   openrouter_api_key: "" # e.g. "sk-or-v1-xxxxx". Set model_name to "openrouter/<model>" to use.
+
+# Vertex AI configuration for Gemini (requires ADC or GOOGLE_APPLICATION_CREDENTIALS).
+google_cloud:
+  project_id: "" # e.g. "your-gcp-project-id"
+  location: "global" # e.g. "global" or "us-central1"

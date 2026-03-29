@@ -67,6 +67,14 @@ try:
             val = model_config_data[section].get(key)
         return val or default
 
+
+    def set_or_clear_env(var_name, value):
+        value = (value or "").strip()
+        if value:
+            os.environ[var_name] = value
+        else:
+            os.environ.pop(var_name, None)
+
 except ImportError as e:
     print(f"DEBUG: ImportError: {e}")
     import traceback
@@ -167,7 +175,7 @@ async def process_parallel_candidates(data_list, exp_mode="dev_planner_critic", 
 async def refine_image_with_nanoviz(image_bytes, edit_prompt, aspect_ratio="21:9", image_size="2K"):
     """
     Refine an image using an Image Editing API.
-    Supports OpenRouter (priority), Google API key, and Vertex AI ADC as fallback.
+    Supports OpenRouter (priority), Google API key, and Vertex AI project credentials.
     
     Args:
         image_bytes: Image data in bytes
@@ -214,9 +222,9 @@ async def refine_image_with_nanoviz(image_bytes, edit_prompt, aspect_ratio="21:9
             if result and result[0] != "Error":
                 return base64.b64decode(result[0]), "✅ Image refined successfully! (via OpenRouter)"
         except Exception as e:
-            print(f"OpenRouter refine failed: {e}, falling back to Google API key...")
+            print(f"OpenRouter refine failed: {e}, falling back to Gemini native client...")
 
-    # --- Path 2 & 3: Gemini native SDK (Google API key or Vertex AI ADC) ---
+    # --- Path 2 & 3: Gemini native SDK (Google API key or Vertex AI) ---
     try:
         from google import genai
         from google.genai import types
@@ -234,7 +242,10 @@ async def refine_image_with_nanoviz(image_bytes, edit_prompt, aspect_ratio="21:9
         client = genai.Client(vertexai=True, project=project_id, location=location)
         via = "Vertex AI"
     else:
-        return None, "❌ Error: No API credentials configured. Set OPENROUTER_API_KEY, GOOGLE_API_KEY, or configure Vertex AI project in configs/model_config.yaml."
+        return None, (
+            "❌ Error: No API credentials configured. Set OPENROUTER_API_KEY, GOOGLE_API_KEY, "
+            "or GOOGLE_CLOUD_PROJECT / google_cloud.project_id in configs/model_config.yaml."
+        )
 
     try:
         contents = [
@@ -411,7 +422,58 @@ def display_candidate_result(result, candidate_id, exp_mode):
 def main():
     st.title("🍌 PaperBanana Demo")
     st.markdown("AI-powered scientific diagram generation and refinement")
-    
+
+    with st.sidebar:
+        st.subheader("🔐 API / Cloud Settings")
+        st.caption(
+            "Provide at least one credential source: OpenRouter, Google API key, or Vertex AI project settings."
+        )
+
+        openrouter_key_input = st.text_input(
+            "OpenRouter API Key (optional)",
+            value=get_config_val("api_keys", "openrouter_api_key", "OPENROUTER_API_KEY", ""),
+            type="password",
+            key="global_openrouter_api_key",
+        )
+        google_key_input = st.text_input(
+            "Google API Key (optional)",
+            value=get_config_val("api_keys", "google_api_key", "GOOGLE_API_KEY", ""),
+            type="password",
+            key="global_google_api_key",
+        )
+        vertex_project_input = st.text_input(
+            "Vertex AI Project ID (optional)",
+            value=get_config_val("google_cloud", "project_id", "GOOGLE_CLOUD_PROJECT", ""),
+            key="global_vertex_project_id",
+        )
+        vertex_location_input = st.text_input(
+            "Vertex AI Location (optional)",
+            value=get_config_val("google_cloud", "location", "GOOGLE_CLOUD_LOCATION", "global"),
+            key="global_vertex_location",
+            placeholder="global",
+        )
+
+        if st.button("Apply Credentials", key="global_apply_credentials", use_container_width=True):
+            set_or_clear_env("OPENROUTER_API_KEY", openrouter_key_input)
+            set_or_clear_env("GOOGLE_API_KEY", google_key_input)
+            set_or_clear_env("GOOGLE_CLOUD_PROJECT", vertex_project_input)
+            set_or_clear_env("GOOGLE_CLOUD_LOCATION", vertex_location_input)
+
+            from utils.generation_utils import reinitialize_clients
+
+            initialized = reinitialize_clients()
+            if initialized:
+                st.success(f"Clients initialized: {', '.join(initialized)}")
+            else:
+                st.warning(
+                    "No API clients could be initialized. Configure OpenRouter, Google (Gemini), or Vertex AI."
+                )
+
+        st.caption(
+            "Vertex AI requires Application Default Credentials or GOOGLE_APPLICATION_CREDENTIALS in the runtime environment."
+        )
+        st.divider()
+
     # Create tabs
     tab1, tab2 = st.tabs(["📊 Generate Candidates", "✨ Refine Image"])
     
