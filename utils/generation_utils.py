@@ -69,17 +69,50 @@ def get_vertex_ai_config():
     return project_id, location
 
 
+def get_api_base_url(provider: str) -> str:
+    """Return optional custom base URL for a provider."""
+    provider_map = {
+        "google": ("api_base_urls", "google_genai_base_url", "GOOGLE_GENAI_BASE_URL"),
+        "openai": ("api_base_urls", "openai_base_url", "OPENAI_BASE_URL"),
+        "anthropic": ("api_base_urls", "anthropic_base_url", "ANTHROPIC_BASE_URL"),
+    }
+    section, key, env_var = provider_map[provider]
+    return get_config_val(section, key, env_var, "")
+
+
+def get_google_http_options():
+    """Build google-genai HttpOptions when a custom base URL is configured."""
+    google_base_url = get_api_base_url("google")
+    if not google_base_url:
+        return None, ""
+
+    http_options = types.HttpOptionsDict(
+        base_url=google_base_url,
+        base_url_resource_scope=types.ResourceScope.COLLECTION,
+    )
+    return http_options, google_base_url
+
+
 def initialize_gemini_client():
     """Initialize Gemini using either Google API key or Vertex AI credentials."""
+    http_options, google_base_url = get_google_http_options()
+    base_url_suffix = f" via custom base URL ({google_base_url})" if google_base_url else ""
+
     api_key = get_config_val("api_keys", "google_api_key", "GOOGLE_API_KEY", "")
     if api_key:
-        return genai.Client(api_key=api_key), "Gemini (Google API key)"
+        client_kwargs = {"api_key": api_key}
+        if http_options is not None:
+            client_kwargs["http_options"] = http_options
+        return genai.Client(**client_kwargs), f"Gemini (Google API key){base_url_suffix}"
 
     project_id, location = get_vertex_ai_config()
     if project_id:
+        client_kwargs = {"vertexai": True, "project": project_id, "location": location}
+        if http_options is not None:
+            client_kwargs["http_options"] = http_options
         return (
-            genai.Client(vertexai=True, project=project_id, location=location),
-            f"Gemini (Vertex AI: {project_id}/{location})",
+            genai.Client(**client_kwargs),
+            f"Gemini (Vertex AI: {project_id}/{location}){base_url_suffix}",
         )
 
     return None, ""
@@ -114,17 +147,31 @@ def reinitialize_clients():
 
     key = get_config_val("api_keys", "anthropic_api_key", "ANTHROPIC_API_KEY", "")
     if key:
-        anthropic_client = AsyncAnthropic(api_key=key)
-        print("Initialized Anthropic Client with API Key")
-        initialized.append("Anthropic")
+        anthropic_kwargs = {"api_key": key}
+        anthropic_base_url = get_api_base_url("anthropic")
+        if anthropic_base_url:
+            anthropic_kwargs["base_url"] = anthropic_base_url
+        anthropic_client = AsyncAnthropic(**anthropic_kwargs)
+        label = "Anthropic"
+        if anthropic_base_url:
+            label += f" (base URL: {anthropic_base_url})"
+        print(f"Initialized {label}")
+        initialized.append(label)
     else:
         anthropic_client = None
 
     key = get_config_val("api_keys", "openai_api_key", "OPENAI_API_KEY", "")
     if key:
-        openai_client = AsyncOpenAI(api_key=key)
-        print("Initialized OpenAI Client with API Key")
-        initialized.append("OpenAI")
+        openai_kwargs = {"api_key": key}
+        openai_base_url = get_api_base_url("openai")
+        if openai_base_url:
+            openai_kwargs["base_url"] = openai_base_url
+        openai_client = AsyncOpenAI(**openai_kwargs)
+        label = "OpenAI"
+        if openai_base_url:
+            label += f" (base URL: {openai_base_url})"
+        print(f"Initialized {label}")
+        initialized.append(label)
     else:
         openai_client = None
 

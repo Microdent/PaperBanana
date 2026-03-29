@@ -226,22 +226,13 @@ async def refine_image_with_nanoviz(image_bytes, edit_prompt, aspect_ratio="21:9
 
     # --- Path 2 & 3: Gemini native SDK (Google API key or Vertex AI) ---
     try:
-        from google import genai
         from google.genai import types
+        from utils.generation_utils import initialize_gemini_client
     except ImportError:
         return None, "❌ Error: google-genai SDK not installed and OpenRouter unavailable."
 
-    google_api_key = get_config_val("api_keys", "google_api_key", "GOOGLE_API_KEY", "")
-    project_id = get_config_val("google_cloud", "project_id", "GOOGLE_CLOUD_PROJECT", "")
-
-    if google_api_key:
-        client = genai.Client(api_key=google_api_key)
-        via = "Google API key"
-    elif project_id:
-        location = get_config_val("google_cloud", "location", "GOOGLE_CLOUD_LOCATION", "global")
-        client = genai.Client(vertexai=True, project=project_id, location=location)
-        via = "Vertex AI"
-    else:
+    client, via = initialize_gemini_client()
+    if client is None:
         return None, (
             "❌ Error: No API credentials configured. Set OPENROUTER_API_KEY, GOOGLE_API_KEY, "
             "or GOOGLE_CLOUD_PROJECT / google_cloud.project_id in configs/model_config.yaml."
@@ -452,12 +443,33 @@ def main():
             key="global_vertex_location",
             placeholder="global",
         )
+        google_base_url_input = st.text_input(
+            "Gemini Base URL (optional)",
+            value=get_config_val("api_base_urls", "google_genai_base_url", "GOOGLE_GENAI_BASE_URL", ""),
+            key="global_google_genai_base_url",
+            placeholder="https://your-gateway.example.com",
+        )
+        openai_base_url_input = st.text_input(
+            "OpenAI Base URL (optional)",
+            value=get_config_val("api_base_urls", "openai_base_url", "OPENAI_BASE_URL", ""),
+            key="global_openai_base_url",
+            placeholder="https://your-openai-compatible.example.com/v1",
+        )
+        anthropic_base_url_input = st.text_input(
+            "Anthropic Base URL (optional)",
+            value=get_config_val("api_base_urls", "anthropic_base_url", "ANTHROPIC_BASE_URL", ""),
+            key="global_anthropic_base_url",
+            placeholder="https://your-anthropic-compatible.example.com",
+        )
 
         if st.button("Apply Credentials", key="global_apply_credentials", use_container_width=True):
             set_or_clear_env("OPENROUTER_API_KEY", openrouter_key_input)
             set_or_clear_env("GOOGLE_API_KEY", google_key_input)
             set_or_clear_env("GOOGLE_CLOUD_PROJECT", vertex_project_input)
             set_or_clear_env("GOOGLE_CLOUD_LOCATION", vertex_location_input)
+            set_or_clear_env("GOOGLE_GENAI_BASE_URL", google_base_url_input)
+            set_or_clear_env("OPENAI_BASE_URL", openai_base_url_input)
+            set_or_clear_env("ANTHROPIC_BASE_URL", anthropic_base_url_input)
 
             from utils.generation_utils import reinitialize_clients
 
@@ -472,6 +484,7 @@ def main():
         st.caption(
             "Vertex AI requires Application Default Credentials or GOOGLE_APPLICATION_CREDENTIALS in the runtime environment."
         )
+        st.caption("OpenRouter keeps its default official endpoint. Gemini/OpenAI/Anthropic base URLs are optional overrides.")
         st.divider()
 
     # Create tabs

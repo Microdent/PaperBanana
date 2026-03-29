@@ -26,6 +26,12 @@ api_keys:
   anthropic_api_key: ""
   openrouter_api_key: "" # e.g. "sk-or-v1-xxxxx". Set model_name to "openrouter/<model>" to use.
 
+# Optional custom API base URLs. OpenRouter keeps its official endpoint.
+api_base_urls:
+  google_genai_base_url: "" # e.g. "https://your-gemini-gateway.example.com"
+  openai_base_url: "" # e.g. "https://your-openai-compatible.example.com/v1"
+  anthropic_base_url: "" # e.g. "https://your-anthropic-compatible.example.com"
+
 # Vertex AI configuration for Gemini (requires ADC or GOOGLE_APPLICATION_CREDENTIALS).
 google_cloud:
   project_id: "" # e.g. "your-gcp-project-id"

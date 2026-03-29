@@ -8,6 +8,9 @@ dependencies:
     - GOOGLE_API_KEY (alternative)
     - GOOGLE_CLOUD_PROJECT (alternative to GOOGLE_API_KEY)
     - GOOGLE_CLOUD_LOCATION (optional; defaults to global)
+    - GOOGLE_GENAI_BASE_URL (optional)
+    - OPENAI_BASE_URL (optional)
+    - ANTHROPIC_BASE_URL (optional)
   runtime:
     - python3
     - uv
@@ -48,6 +51,15 @@ export GOOGLE_APPLICATION_CREDENTIALS="/path/to/service-account.json"
 ```
 
 If multiple providers are configured, OpenRouter is used by default. Gemini can run through either Google API key or Vertex AI.
+
+Optional custom API base URLs:
+```bash
+export GOOGLE_GENAI_BASE_URL="https://your-gemini-gateway.example.com"
+export OPENAI_BASE_URL="https://your-openai-compatible.example.com/v1"
+export ANTHROPIC_BASE_URL="https://your-anthropic-compatible.example.com"
+```
+
+OpenRouter keeps its official endpoint. Gemini custom base URL support is routed through `google-genai` `http_options`.
 
 ## Usage
 

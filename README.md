@@ -81,6 +81,26 @@ gcloud auth application-default login
 export GOOGLE_APPLICATION_CREDENTIALS="/path/to/service-account.json"
 ```
 
+Optional custom base URLs:
+```yaml
+api_base_urls:
+  google_genai_base_url: "https://your-gemini-gateway.example.com"
+  openai_base_url: "https://your-openai-compatible.example.com/v1"
+  anthropic_base_url: "https://your-anthropic-compatible.example.com"
+```
+
+Environment-variable equivalents:
+```bash
+export GOOGLE_GENAI_BASE_URL="https://your-gemini-gateway.example.com"
+export OPENAI_BASE_URL="https://your-openai-compatible.example.com/v1"
+export ANTHROPIC_BASE_URL="https://your-anthropic-compatible.example.com"
+```
+
+Notes:
+- OpenRouter continues to use its official fixed endpoint.
+- OpenAI and Anthropic custom base URLs are useful for OpenAI-compatible/Anthropic-compatible gateways.
+- Gemini custom base URL is wired through the `google-genai` client `http_options`; Google’s official Python examples explicitly document custom base URLs on Vertex-style routes, so non-Vertex proxies should be treated as compatibility-dependent.
+
 Note that if you need to generate many candidates simultaneously, you will require a credential source with sufficient concurrency quota.
 
 ### Step3: Downloading the Dataset
@@ -112,7 +132,7 @@ First download [PaperBananaBench](https://huggingface.co/datasets/dwzhu/PaperBan
 **Try it online — no setup required:**  
 👉 **[PaperBanana on Hugging Face Spaces](https://huggingface.co/spaces/dwzhu/PaperBanana)**
 
-To get started, enter your credential source (OpenRouter API key, Google Gemini API key, or Vertex AI project settings), then configure your desired parameters (pipeline mode, number of candidates, aspect ratio, etc.), paste your method section text and figure caption, and click **Generate**.
+To get started, enter your credential source (OpenRouter API key, Google Gemini API key, or Vertex AI project settings), optionally override Gemini/OpenAI/Anthropic base URLs, then configure your desired parameters (pipeline mode, number of candidates, aspect ratio, etc.), paste your method section text and figure caption, and click **Generate**.
 
 You can also run the Gradio app locally:
 ```bash
@@ -125,7 +145,7 @@ The easiest way to launch PaperBanana is via the interactive Streamlit demo:
 streamlit run demo.py
 ```
 
-The Streamlit sidebar also supports OpenRouter, Google API key, and Vertex AI project configuration for the full pipeline.
+The Streamlit sidebar also supports OpenRouter, Google API key, Vertex AI project configuration, and optional Gemini/OpenAI/Anthropic base URL overrides for the full pipeline.
 
 The web interface provides two main workflows:
 
@@ -334,4 +354,3 @@ If you find this repo helpful, please cite our paper as follows:
 This is not an officially supported Google product. This project is not eligible for the [Google Open Source Software Vulnerability Rewards Program](https://bughunters.google.com/open-source-security).
 
 Our goal is simply to benefit the community, so currently we have no plans to use it for commercial purposes. The core methodology was developed during my internship at Google, and patents have been filed for these specific workflows by Google. While this doesn't impact open-source research efforts, it restricts third-party commercial applications using similar logic.
-
