@@ -37,6 +37,7 @@ import os
 
 import yaml
 from pathlib import Path
+from urllib.parse import urlsplit, urlunsplit
 
 # Load config
 config_path = Path(__file__).parent.parent / "configs" / "model_config.yaml"
@@ -903,6 +904,85 @@ def _extract_data_url_b64(value: str) -> str:
     return ""
 
 
+def _looks_like_image_bytes(data: bytes) -> bool:
+    if not data:
+        return False
+
+    if data.startswith((b"\x89PNG\r\n\x1a\n", b"\xff\xd8\xff", b"GIF87a", b"GIF89a", b"BM")):
+        return True
+
+    if data.startswith(b"RIFF") and data[8:12] == b"WEBP":
+        return True
+
+    if len(data) >= 12 and data[4:8] == b"ftyp" and data[8:12] in {
+        b"avif",
+        b"avis",
+        b"heic",
+        b"heif",
+        b"mif1",
+        b"msf1",
+    }:
+        return True
+
+    return False
+
+
+def _extract_raw_base64_image(value: str) -> str:
+    normalized = re.sub(r"\s+", "", value)
+    if len(normalized) < 128:
+        return ""
+    if not re.fullmatch(r"[A-Za-z0-9+/=_-]+", normalized):
+        return ""
+
+    pad_len = (-len(normalized)) % 4
+    padded = normalized + ("=" * pad_len)
+
+    for altchars in (None, b"-_"):
+        try:
+            if altchars is None:
+                decoded = base64.b64decode(padded, validate=False)
+            else:
+                decoded = base64.b64decode(padded, altchars=altchars, validate=False)
+        except Exception:
+            continue
+        if _looks_like_image_bytes(decoded):
+            return base64.b64encode(decoded).decode("utf-8")
+
+    return ""
+
+
+def _extract_img_src_from_html(value: str) -> str:
+    match = re.search(r"""<img[^>]+src=["']([^"']+)["']""", value, flags=re.IGNORECASE)
+    return match.group(1).strip() if match else ""
+
+
+def _summarize_image_content(value: Any) -> str:
+    if isinstance(value, str):
+        compact = value.strip()
+        raw_b64 = bool(_extract_raw_base64_image(compact))
+        return (
+            f"str(len={len(compact)}, data_url={bool(_extract_data_url_b64(compact))}, "
+            f"http_url={_looks_like_http_url(compact)}, markdown_url={bool(_extract_url_from_markdown(compact))}, "
+            f"html_img={bool(_extract_img_src_from_html(compact))}, raw_b64={raw_b64})"
+        )
+    if isinstance(value, list):
+        first = value[0] if value else None
+        first_keys = list(first.keys()) if isinstance(first, dict) else []
+        return f"list(len={len(value)}, first_item_type={type(first).__name__}, first_item_keys={first_keys})"
+    if isinstance(value, dict):
+        return f"dict(keys={list(value.keys())})"
+    return type(value).__name__
+
+
+def _should_try_newapi_gemini_native_fallback(model_name: str) -> bool:
+    base_url = (openai_base_url or "").lower()
+    return (
+        model_name.startswith("gemini")
+        and bool(base_url)
+        and "api.openai.com" not in base_url
+    )
+
+
 def _extract_first_image_ref_from_obj(obj: Any) -> tuple[str, str]:
     """Return ('b64'|'url'|'', value) from many OpenAI-compatible/New API shapes."""
     if obj is None:
@@ -920,6 +1000,10 @@ def _extract_first_image_ref_from_obj(obj: Any) -> tuple[str, str]:
         if _looks_like_http_url(value):
             return "url", value
 
+        html_img_src = _extract_img_src_from_html(value)
+        if html_img_src:
+            return _extract_first_image_ref_from_obj(html_img_src)
+
         md_url = _extract_url_from_markdown(value)
         if md_url:
             return "url", md_url
@@ -933,8 +1017,16 @@ def _extract_first_image_ref_from_obj(obj: Any) -> tuple[str, str]:
             try:
                 parsed = json.loads(normalized)
             except Exception:
-                return "", ""
-            return _extract_first_image_ref_from_obj(parsed)
+                try:
+                    parsed = literal_eval(normalized)
+                except Exception:
+                    parsed = None
+            if parsed is not None:
+                return _extract_first_image_ref_from_obj(parsed)
+
+        raw_b64 = _extract_raw_base64_image(normalized)
+        if raw_b64:
+            return "b64", raw_b64
 
         return "", ""
 
@@ -1039,6 +1131,153 @@ def _extract_text_prompt(contents: List[Dict[str, Any]]) -> str:
     return "\n".join(item.get("text", "") for item in contents if item.get("type") == "text").strip()
 
 
+def _normalize_image_size_for_gemini(size: str) -> str:
+    mapping = {"1k": "1K", "2k": "2K", "4k": "4K"}
+    return mapping.get(str(size).lower(), size)
+
+
+def _get_base_origin_from_base_url(base_url: str) -> str:
+    parsed = urlsplit(base_url)
+    if not parsed.scheme or not parsed.netloc:
+        return base_url.rstrip("/")
+    return urlunsplit((parsed.scheme, parsed.netloc, "", "", "")).rstrip("/")
+
+
+def _convert_to_gemini_http_contents(contents: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    parts = []
+    for item in contents:
+        if item.get("type") == "text":
+            parts.append({"text": item["text"]})
+        elif item.get("type") == "image":
+            source = item.get("source", {})
+            if source.get("type") == "base64":
+                parts.append(
+                    {
+                        "inlineData": {
+                            "mimeType": source.get("media_type", "image/jpeg"),
+                            "data": source.get("data", ""),
+                        }
+                    }
+                )
+            elif "image_base64" in item:
+                parts.append(
+                    {
+                        "inlineData": {
+                            "mimeType": "image/jpeg",
+                            "data": item["image_base64"],
+                        }
+                    }
+                )
+            elif "data" in item:
+                parts.append(
+                    {
+                        "inlineData": {
+                            "mimeType": item.get("mime_type", "image/jpeg"),
+                            "data": item.get("data", ""),
+                        }
+                    }
+                )
+    return [{"role": "user", "parts": parts}]
+
+
+def _extract_first_b64_image_from_gemini_native_response(data: Dict[str, Any]) -> str:
+    candidates = data.get("candidates", [])
+    for candidate in candidates:
+        content = candidate.get("content", {})
+        parts = content.get("parts", [])
+        for part in parts:
+            inline_data = part.get("inlineData") or part.get("inline_data")
+            if isinstance(inline_data, dict):
+                b64_data = inline_data.get("data", "")
+                if b64_data:
+                    return b64_data
+    return ""
+
+
+async def call_newapi_gemini_native_image_generation_with_retry_async(
+    model_name, contents, config, max_attempts=5, retry_delay=30, error_context=""
+):
+    """Fallback for New API Gemini image models via native Gemini endpoint."""
+    if not openai_api_key:
+        raise RuntimeError(
+            "New API Gemini fallback requires OPENAI_API_KEY / api_keys.openai_api_key."
+        )
+
+    base_url = (openai_base_url or "").rstrip("/")
+    if not base_url:
+        raise RuntimeError("New API Gemini fallback requires OPENAI_BASE_URL / api_base_urls.openai_base_url.")
+
+    endpoint = f"{_get_base_origin_from_base_url(base_url)}/v1beta/models/{model_name}:generateContent"
+    payload = {
+        "contents": _convert_to_gemini_http_contents(contents),
+        "generationConfig": {
+            "temperature": config.get("temperature", 1.0),
+            "candidateCount": config.get("candidate_count", 1),
+            "maxOutputTokens": config.get("max_output_tokens", 50000),
+            "responseModalities": ["TEXT", "IMAGE"],
+            "imageConfig": {
+                "aspectRatio": config.get("aspect_ratio", "1:1"),
+                "imageSize": _normalize_image_size_for_gemini(config.get("image_size", "1k")),
+            },
+        },
+    }
+    system_prompt = config.get("system_prompt", "")
+    if system_prompt:
+        payload["systemInstruction"] = {"parts": [{"text": system_prompt}]}
+
+    headers = {
+        "Authorization": f"Bearer {openai_api_key}",
+        "Content-Type": "application/json",
+    }
+
+    for attempt in range(max_attempts):
+        try:
+            async with httpx.AsyncClient(timeout=300) as client:
+                resp = await client.post(endpoint, headers=headers, json=payload)
+            resp.raise_for_status()
+            data = resp.json()
+
+            b64_data = _extract_first_b64_image_from_gemini_native_response(data)
+            if b64_data:
+                return [b64_data]
+
+            current_delay = min(retry_delay * (2 ** attempt), 60)
+            print(
+                f"[Warning]: New API Gemini native fallback returned no images, retrying... "
+                f"top-level keys={list(data.keys())}"
+            )
+            if attempt < max_attempts - 1:
+                await asyncio.sleep(current_delay)
+            continue
+
+        except httpx.HTTPStatusError as e:
+            context_msg = f" for {error_context}" if error_context else ""
+            current_delay = min(retry_delay * (2 ** attempt), 60)
+            print(
+                f"New API Gemini native fallback attempt {attempt + 1} failed{context_msg}: "
+                f"HTTP {e.response.status_code} - {e.response.text}. Retrying in {current_delay}s..."
+            )
+            if attempt < max_attempts - 1:
+                await asyncio.sleep(current_delay)
+            else:
+                print(f"Error: All {max_attempts} New API Gemini native fallback attempts failed{context_msg}")
+                return ["Error"]
+        except Exception as e:
+            context_msg = f" for {error_context}" if error_context else ""
+            current_delay = min(retry_delay * (2 ** attempt), 60)
+            print(
+                f"New API Gemini native fallback attempt {attempt + 1} failed{context_msg}: {e}. "
+                f"Retrying in {current_delay}s..."
+            )
+            if attempt < max_attempts - 1:
+                await asyncio.sleep(current_delay)
+            else:
+                print(f"Error: All {max_attempts} New API Gemini native fallback attempts failed{context_msg}")
+                return ["Error"]
+
+    return ["Error"]
+
+
 async def call_openai_compatible_image_generation_with_retry_async(
     model_name, contents, config, max_attempts=5, retry_delay=30, error_context="", provider_label="OpenAI-compatible"
 ):
@@ -1069,6 +1308,7 @@ async def call_openai_compatible_image_generation_with_retry_async(
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": openai_contents},
         ],
+        "stream": False,
         "temperature": temperature,
         "modalities": ["image", "text"],
     }
@@ -1093,13 +1333,33 @@ async def call_openai_compatible_image_generation_with_retry_async(
 
             choices = data.get("choices", [])
             message_keys = []
+            content_summary = "missing"
             if choices and isinstance(choices[0], dict):
                 message = choices[0].get("message", {})
                 if isinstance(message, dict):
                     message_keys = list(message.keys())
+                    content_summary = _summarize_image_content(message.get("content"))
+
+            if _should_try_newapi_gemini_native_fallback(model_name):
+                print(
+                    f"[Info]: {provider_label} returned no directly parseable image for Gemini model "
+                    f"{model_name}; trying Gemini-native fallback on the same gateway..."
+                )
+                fallback_result = await call_newapi_gemini_native_image_generation_with_retry_async(
+                    model_name=model_name,
+                    contents=contents,
+                    config=config,
+                    max_attempts=1,
+                    retry_delay=retry_delay,
+                    error_context=error_context,
+                )
+                if fallback_result and fallback_result[0] != "Error":
+                    return fallback_result
+
             print(
                 f"[Warning]: {provider_label} image generation returned no images, "
-                f"retrying... top-level keys={list(data.keys())}, message keys={message_keys}"
+                f"retrying... top-level keys={list(data.keys())}, message keys={message_keys}, "
+                f"content={content_summary}"
             )
             if attempt < max_attempts - 1:
                 await asyncio.sleep(retry_delay)
