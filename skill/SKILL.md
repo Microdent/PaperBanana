@@ -51,6 +51,7 @@ export GOOGLE_APPLICATION_CREDENTIALS="/path/to/service-account.json"
 ```
 
 If multiple providers are configured, OpenRouter is used by default. Gemini can run through either Google API key or Vertex AI.
+To force a model through your OpenAI-compatible gateway, prefix it with `openai/`, for example `openai/gemini-2.5-pro` or `openai/gemini-2.5-flash-image`.
 
 Optional custom API base URLs:
 ```bash

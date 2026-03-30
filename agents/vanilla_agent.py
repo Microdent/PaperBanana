@@ -130,47 +130,25 @@ class VanillaAgent(BaseAgent):
         aspect_ratio = data["additional_info"]["rounded_ratio"]
 
         if cfg["use_image_generation"]:
-            if "gpt-image" in self.model_name:
-                image_config = {
-                    "size": "1536x1024",
-                    "quality": "high",
-                    "background": "opaque",
-                    "output_format": "png",
-                }
-                response_list = await generation_utils.call_openai_image_generation_with_retry_async(
-                    model_name=self.model_name,
-                    prompt=prompt_text[:30000],
-                    config=image_config,
-                    max_attempts=5,
-                    retry_delay=30,
-                )
-            elif generation_utils.openrouter_client is not None:
-                image_config = {
-                    "system_prompt": self.system_prompt,
-                    "temperature": self.exp_config.temperature,
-                    "aspect_ratio": aspect_ratio,
-                    "image_size": "1k",
-                }
-                response_list = await generation_utils.call_openrouter_image_generation_with_retry_async(
-                    model_name=self.model_name,
-                    contents=content_list,
-                    config=image_config,
-                    max_attempts=5,
-                    retry_delay=30,
-                )
-            else:
-                gen_config_args["response_modalities"] = ["IMAGE"]
-                gen_config_args["image_config"] = types.ImageConfig(
-                    aspect_ratio=aspect_ratio,
-                    image_size="1k",
-                )
-                response_list = await generation_utils.call_gemini_with_retry_async(
-                    model_name=self.model_name,
-                    contents=content_list,
-                    config=types.GenerateContentConfig(**gen_config_args),
-                    max_attempts=5,
-                    retry_delay=30,
-                )
+            image_config = {
+                "system_prompt": self.system_prompt,
+                "temperature": self.exp_config.temperature,
+                "candidate_count": 1,
+                "max_output_tokens": 50000,
+                "aspect_ratio": aspect_ratio,
+                "image_size": "1k",
+                "size": "1536x1024",
+                "quality": "high",
+                "background": "opaque",
+                "output_format": "png",
+            }
+            response_list = await generation_utils.call_image_generation_with_retry_async(
+                model_name=self.model_name,
+                contents=content_list,
+                config=image_config,
+                max_attempts=5,
+                retry_delay=30,
+            )
         else:
             # Code/text generation — use the unified router
             response_list = await generation_utils.call_model_with_retry_async(

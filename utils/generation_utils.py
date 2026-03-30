@@ -122,6 +122,8 @@ gemini_client = None
 anthropic_client = None
 openai_client = None
 openrouter_client = None
+openai_api_key = ""
+openai_base_url = ""
 openrouter_api_key = ""
 
 
@@ -135,6 +137,7 @@ def reinitialize_clients():
     """
     global gemini_client, anthropic_client, openai_client
     global openrouter_client, openrouter_api_key
+    global openai_api_key, openai_base_url
 
     initialized = []
 
@@ -160,10 +163,10 @@ def reinitialize_clients():
     else:
         anthropic_client = None
 
-    key = get_config_val("api_keys", "openai_api_key", "OPENAI_API_KEY", "")
-    if key:
-        openai_kwargs = {"api_key": key}
-        openai_base_url = get_api_base_url("openai")
+    openai_api_key = get_config_val("api_keys", "openai_api_key", "OPENAI_API_KEY", "")
+    openai_base_url = get_api_base_url("openai")
+    if openai_api_key:
+        openai_kwargs = {"api_key": openai_api_key}
         if openai_base_url:
             openai_kwargs["base_url"] = openai_base_url
         openai_client = AsyncOpenAI(**openai_kwargs)
@@ -217,6 +220,13 @@ def _convert_to_gemini_parts(contents: List[Dict[str, Any]]) -> List[types.Part]
                     types.Part.from_bytes(
                         data=base64.b64decode(item["image_base64"]),
                         mime_type="image/jpeg",
+                    )
+                )
+            elif "data" in item:
+                gemini_parts.append(
+                    types.Part.from_bytes(
+                        data=base64.b64decode(item["data"]),
+                        mime_type=item.get("mime_type", "image/jpeg"),
                     )
                 )
     return gemini_parts
@@ -359,6 +369,14 @@ def _convert_to_openai_format(contents: List[Dict[str, Any]]) -> List[Dict[str, 
             elif "image_base64" in item:
                 # Shorthand format used by planner_agent
                 data_url = f"data:image/jpeg;base64,{item['image_base64']}"
+                openai_contents.append({
+                    "type": "image_url",
+                    "image_url": {"url": data_url}
+                })
+            elif "data" in item:
+                media_type = item.get("mime_type", "image/jpeg")
+                data = item.get("data", "")
+                data_url = f"data:{media_type};base64,{data}"
                 openai_contents.append({
                     "type": "image_url",
                     "image_url": {"url": data_url}
@@ -812,6 +830,15 @@ async def call_openrouter_image_generation_with_retry_async(
     return ["Error"]
 
 
+def _strip_known_provider_prefix(model_name: str) -> tuple[str | None, str]:
+    """Strip explicit provider prefixes like openai/ or openrouter/."""
+    for provider in ("openrouter", "openai", "anthropic", "gemini"):
+        prefix = f"{provider}/"
+        if model_name.startswith(prefix):
+            return provider, model_name[len(prefix):]
+    return None, model_name
+
+
 def _to_openrouter_model_id(model_name: str) -> str:
     """Convert a bare model name to OpenRouter format (provider/model).
 
@@ -826,6 +853,232 @@ def _to_openrouter_model_id(model_name: str) -> str:
     return model_name
 
 
+def _resolve_provider_and_model_name(model_name: str) -> tuple[str, str]:
+    """Resolve provider routing for text/image calls."""
+    explicit_provider, stripped_model_name = _strip_known_provider_prefix(model_name)
+
+    if explicit_provider == "openrouter":
+        return "openrouter", stripped_model_name
+    if explicit_provider == "openai":
+        return "openai", stripped_model_name
+    if explicit_provider == "anthropic":
+        return "anthropic", stripped_model_name
+    if explicit_provider == "gemini":
+        return "gemini", stripped_model_name
+
+    if stripped_model_name.startswith("claude-"):
+        return "anthropic", stripped_model_name
+    if any(stripped_model_name.startswith(p) for p in ("gpt-", "o1-", "o3-", "o4-")):
+        return "openai", stripped_model_name
+
+    if openrouter_client is not None:
+        return "openrouter", _to_openrouter_model_id(stripped_model_name)
+    if gemini_client is not None:
+        return "gemini", stripped_model_name
+    if anthropic_client is not None:
+        return "anthropic", stripped_model_name
+    if openai_client is not None:
+        return "openai", stripped_model_name
+
+    raise RuntimeError(
+        "No API client available. Please configure at least one credential source "
+        "(OpenRouter, Gemini via GOOGLE_API_KEY, Gemini via Vertex AI / GOOGLE_CLOUD_PROJECT, "
+        "Anthropic, or OpenAI) in configs/model_config.yaml or via environment variables."
+    )
+
+
+def _extract_first_b64_image_from_openai_compatible_response(data: Dict[str, Any]) -> str:
+    """Extract base64 image payload from OpenAI-compatible chat completion response JSON."""
+    choices = data.get("choices", [])
+    if not choices:
+        return ""
+
+    message = choices[0].get("message", {})
+    content = message.get("content")
+    if isinstance(content, list):
+        for part in content:
+            if isinstance(part, dict) and "inline_data" in part:
+                b64_data = part["inline_data"].get("data", "")
+                if b64_data:
+                    return b64_data
+            if isinstance(part, dict) and part.get("type") == "output_text":
+                text = part.get("text", "")
+                if isinstance(text, str) and text.startswith("data:image") and "," in text:
+                    return text.split(",", 1)[1]
+
+    images = message.get("images")
+    if images and len(images) > 0:
+        img_item = images[0]
+        if isinstance(img_item, dict):
+            data_url = img_item.get("image_url", {}).get("url", "")
+        else:
+            data_url = str(img_item)
+        if data_url:
+            return data_url.split(",", 1)[1] if "," in data_url else data_url
+
+    if isinstance(content, str) and content.startswith("data:image"):
+        return content.split(",", 1)[1] if "," in content else content
+
+    return ""
+
+
+def _contents_have_image_input(contents: List[Dict[str, Any]]) -> bool:
+    return any(item.get("type") == "image" for item in contents)
+
+
+def _extract_text_prompt(contents: List[Dict[str, Any]]) -> str:
+    return "\n".join(item.get("text", "") for item in contents if item.get("type") == "text").strip()
+
+
+async def call_openai_compatible_image_generation_with_retry_async(
+    model_name, contents, config, max_attempts=5, retry_delay=30, error_context="", provider_label="OpenAI-compatible"
+):
+    """Call an OpenAI-compatible /chat/completions endpoint for image generation."""
+    if not openai_api_key:
+        raise RuntimeError(
+            "OpenAI-compatible client was not initialized: missing OPENAI_API_KEY / api_keys.openai_api_key."
+        )
+
+    base_url = (openai_base_url or "https://api.openai.com/v1").rstrip("/")
+    endpoint = f"{base_url}/chat/completions"
+    system_prompt = config.get("system_prompt", "")
+    temperature = config.get("temperature", 1.0)
+    aspect_ratio = config.get("aspect_ratio", "1:1")
+    image_size = config.get("image_size", "1k")
+
+    openai_contents = _convert_to_openai_format(contents)
+
+    image_config = {}
+    if aspect_ratio:
+        image_config["aspect_ratio"] = aspect_ratio
+    if image_size:
+        image_config["image_size"] = image_size
+
+    payload = {
+        "model": model_name,
+        "messages": [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": openai_contents},
+        ],
+        "temperature": temperature,
+        "modalities": ["image", "text"],
+    }
+    if image_config:
+        payload["image_config"] = image_config
+
+    headers = {
+        "Authorization": f"Bearer {openai_api_key}",
+        "Content-Type": "application/json",
+    }
+
+    for attempt in range(max_attempts):
+        try:
+            async with httpx.AsyncClient(timeout=300) as client:
+                resp = await client.post(endpoint, headers=headers, json=payload)
+            resp.raise_for_status()
+            data = resp.json()
+
+            b64_data = _extract_first_b64_image_from_openai_compatible_response(data)
+            if b64_data:
+                return [b64_data]
+
+            print(f"[Warning]: {provider_label} image generation returned no images, retrying...")
+            if attempt < max_attempts - 1:
+                await asyncio.sleep(retry_delay)
+            continue
+
+        except httpx.HTTPStatusError as e:
+            context_msg = f" for {error_context}" if error_context else ""
+            current_delay = min(retry_delay * (2 ** attempt), 60)
+            print(
+                f"{provider_label} image gen attempt {attempt + 1} failed{context_msg}: "
+                f"HTTP {e.response.status_code} - {e.response.text}. Retrying in {current_delay}s..."
+            )
+            if attempt < max_attempts - 1:
+                await asyncio.sleep(current_delay)
+            else:
+                print(f"Error: All {max_attempts} attempts failed{context_msg}")
+                return ["Error"]
+        except Exception as e:
+            context_msg = f" for {error_context}" if error_context else ""
+            current_delay = min(retry_delay * (2 ** attempt), 60)
+            print(
+                f"{provider_label} image gen attempt {attempt + 1} failed{context_msg}: {e}. "
+                f"Retrying in {current_delay}s..."
+            )
+            if attempt < max_attempts - 1:
+                await asyncio.sleep(current_delay)
+            else:
+                print(f"Error: All {max_attempts} attempts failed{context_msg}")
+                return ["Error"]
+
+    return ["Error"]
+
+
+async def call_image_generation_with_retry_async(
+    model_name, contents, config, max_attempts=5, retry_delay=30, error_context=""
+):
+    """Unified image-generation router for Gemini/OpenAI-compatible/OpenRouter."""
+    provider, actual_model = _resolve_provider_and_model_name(model_name)
+
+    if provider == "openai":
+        if actual_model.startswith("gpt-image") and not _contents_have_image_input(contents):
+            prompt = _extract_text_prompt(contents)
+            if not prompt:
+                raise RuntimeError("OpenAI GPT-Image generation requires a text prompt.")
+            return await call_openai_image_generation_with_retry_async(
+                model_name=actual_model,
+                prompt=prompt,
+                config=config,
+                max_attempts=max_attempts,
+                retry_delay=retry_delay,
+                error_context=error_context,
+            )
+        return await call_openai_compatible_image_generation_with_retry_async(
+            model_name=actual_model,
+            contents=contents,
+            config=config,
+            max_attempts=max_attempts,
+            retry_delay=retry_delay,
+            error_context=error_context,
+            provider_label="OpenAI-compatible",
+        )
+
+    if provider == "openrouter":
+        return await call_openrouter_image_generation_with_retry_async(
+            model_name=actual_model,
+            contents=contents,
+            config=config,
+            max_attempts=max_attempts,
+            retry_delay=retry_delay,
+            error_context=error_context,
+        )
+
+    if provider == "gemini":
+        return await call_gemini_with_retry_async(
+            model_name=actual_model,
+            contents=contents,
+            config=types.GenerateContentConfig(
+                system_instruction=config.get("system_prompt", ""),
+                temperature=config.get("temperature", 1.0),
+                candidate_count=config.get("candidate_count", 1),
+                max_output_tokens=config.get("max_output_tokens", 50000),
+                response_modalities=["IMAGE"],
+                image_config=types.ImageConfig(
+                    aspect_ratio=config.get("aspect_ratio", "1:1"),
+                    image_size=config.get("image_size", "1k"),
+                ),
+            ),
+            max_attempts=max_attempts,
+            retry_delay=retry_delay,
+            error_context=error_context,
+        )
+
+    raise RuntimeError(
+        f"Image generation is not supported for provider '{provider}' with model '{actual_model}'."
+    )
+
+
 async def call_model_with_retry_async(
     model_name, contents, config, max_attempts=5, retry_delay=5, error_context=""
 ):
@@ -833,39 +1086,10 @@ async def call_model_with_retry_async(
     Unified router that dispatches to the correct provider based on model_name.
 
     Routing rules:
-      1. Explicit prefix overrides: "openrouter/" -> OpenRouter, "claude-" -> Anthropic,
-         "gpt-"/"o1-"/"o3-"/"o4-" -> OpenAI
-      2. No prefix: auto-detect based on which credentials are configured.
-         Priority: OpenRouter > Gemini > Anthropic > OpenAI
+      1. Explicit prefix overrides: "openrouter/", "openai/", "anthropic/", "gemini/"
+      2. Otherwise auto-detect based on configured credentials.
     """
-    # Explicit provider prefix overrides auto-detection
-    if model_name.startswith("openrouter/"):
-        provider = "openrouter"
-        actual_model = model_name[len("openrouter/"):]
-    elif model_name.startswith("claude-"):
-        provider = "anthropic"
-        actual_model = model_name
-    elif any(model_name.startswith(p) for p in ("gpt-", "o1-", "o3-", "o4-")):
-        provider = "openai"
-        actual_model = model_name
-    else:
-        # Auto-detect provider based on which API key is configured
-        actual_model = model_name
-        if openrouter_client is not None:
-            provider = "openrouter"
-            actual_model = _to_openrouter_model_id(model_name)
-        elif gemini_client is not None:
-            provider = "gemini"
-        elif anthropic_client is not None:
-            provider = "anthropic"
-        elif openai_client is not None:
-            provider = "openai"
-        else:
-            raise RuntimeError(
-                "No API client available. Please configure at least one credential source "
-                "(OpenRouter, Gemini via GOOGLE_API_KEY, Gemini via Vertex AI / GOOGLE_CLOUD_PROJECT, "
-                "Anthropic, or OpenAI) in configs/model_config.yaml or via environment variables."
-            )
+    provider, actual_model = _resolve_provider_and_model_name(model_name)
 
     if provider == "gemini":
         return await call_gemini_with_retry_async(

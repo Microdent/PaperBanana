@@ -63,6 +63,11 @@ We recommend duplicate the `configs/model_config.template.yaml` file into `confi
 
 If multiple providers are configured, OpenRouter is preferred for automatic routing when available.
 
+If you want to force a model through your OpenAI-compatible gateway even when other providers are also configured, prefix the model name with `openai/`. Examples:
+- `openai/gemini-2.5-pro`
+- `openai/gemini-2.5-flash-image`
+- `openai/gpt-image-1`
+
 Example Vertex AI config:
 ```yaml
 google_cloud:
@@ -100,6 +105,7 @@ Notes:
 - OpenRouter continues to use its official fixed endpoint.
 - OpenAI and Anthropic custom base URLs are useful for OpenAI-compatible/Anthropic-compatible gateways.
 - Gemini custom base URL is wired through the `google-genai` client `http_options`; Google’s official Python examples explicitly document custom base URLs on Vertex-style routes, so non-Vertex proxies should be treated as compatibility-dependent.
+- OpenAI-compatible gateways can now be used for non-OpenAI models as well. For example, if your gateway exposes Gemini models via an OpenAI API, set model names like `openai/gemini-2.5-pro` and `openai/gemini-2.5-flash-image`.
 
 Note that if you need to generate many candidates simultaneously, you will require a credential source with sufficient concurrency quota.
 

@@ -148,68 +148,41 @@ async def process_parallel_candidates(
 
 async def refine_image_with_nanoviz(image_bytes, edit_prompt, aspect_ratio="21:9", image_size="2K"):
     image_model = get_config_val("defaults", "image_gen_model_name", "IMAGE_GEN_MODEL_NAME", "")
-    image_b64 = base64.b64encode(image_bytes).decode("utf-8")
-
-    # Path 1: OpenRouter
     try:
-        from utils.generation_utils import call_openrouter_image_generation_with_retry_async
-        _has_openrouter = True
+        from utils.generation_utils import call_image_generation_with_retry_async
     except ImportError:
-        _has_openrouter = False
-    openrouter_api_key = get_config_val("api_keys", "openrouter_api_key", "OPENROUTER_API_KEY", "")
-    if _has_openrouter and openrouter_api_key:
-        try:
-            contents = [
-                {"type": "image", "source": {"type": "base64", "media_type": "image/jpeg", "data": image_b64}},
-                {"type": "text", "text": edit_prompt},
-            ]
-            cfg = {"system_prompt": "", "temperature": 1.0, "aspect_ratio": aspect_ratio, "image_size": image_size}
-            result = await call_openrouter_image_generation_with_retry_async(
-                model_name=image_model, contents=contents, config=cfg, max_attempts=3, retry_delay=10, error_context="refine_image",
-            )
-            if result and result[0] != "Error":
-                return base64.b64decode(result[0]), "Image refined successfully! (via OpenRouter)"
-        except Exception as e:
-            print(f"OpenRouter refine failed: {e}, falling back...")
-
-    # Path 2 & 3: Gemini native SDK (Google API key or Vertex AI)
-    try:
-        from google.genai import types
-        from utils.generation_utils import initialize_gemini_client
-    except ImportError:
-        return None, "Error: google-genai SDK not installed and OpenRouter unavailable."
-
-    client, via = initialize_gemini_client()
-    if client is None:
-        return None, (
-            "Error: No API credentials configured. "
-            "Set OPENROUTER_API_KEY, GOOGLE_API_KEY, or GOOGLE_CLOUD_PROJECT "
-            "(or google_cloud.project_id in configs/model_config.yaml)."
-        )
+        return None, "Error: image generation helpers unavailable."
 
     try:
         contents = [
-            types.Part.from_text(text=edit_prompt),
-            types.Part.from_bytes(mime_type="image/jpeg", data=image_bytes),
+            {"type": "text", "text": edit_prompt},
+            {"type": "image", "source": {"type": "base64", "media_type": "image/jpeg", "data": base64.b64encode(image_bytes).decode("utf-8")}},
         ]
-        gen_config = types.GenerateContentConfig(
-            temperature=1.0, max_output_tokens=8192, response_modalities=["IMAGE"],
-            image_config=types.ImageConfig(aspect_ratio=aspect_ratio, image_size=image_size),
+        cfg = {
+            "system_prompt": "",
+            "temperature": 1.0,
+            "candidate_count": 1,
+            "max_output_tokens": 8192,
+            "aspect_ratio": aspect_ratio,
+            "image_size": image_size,
+            "size": "1536x1024",
+            "quality": "high",
+            "background": "opaque",
+            "output_format": "png",
+        }
+        result = await call_image_generation_with_retry_async(
+            model_name=image_model,
+            contents=contents,
+            config=cfg,
+            max_attempts=3,
+            retry_delay=10,
+            error_context="refine_image",
         )
-        response = await asyncio.to_thread(
-            client.models.generate_content, model=image_model, contents=contents, config=gen_config,
-        )
-        if response.candidates and response.candidates[0].content.parts:
-            for part in response.candidates[0].content.parts:
-                if hasattr(part, "inline_data") and part.inline_data:
-                    data = part.inline_data.data
-                    if isinstance(data, bytes):
-                        return data, f"Image refined successfully! (via {via})"
-                    elif isinstance(data, str):
-                        return base64.b64decode(data), f"Image refined successfully! (via {via})"
-        return None, f"No image data found in {via} response"
+        if result and result[0] != "Error":
+            return base64.b64decode(result[0]), "Image refined successfully!"
+        return None, "No image data found in model response"
     except Exception as e:
-        return None, f"{via} error: {str(e)}"
+        return None, f"Image refinement error: {str(e)}"
 
 
 def get_evolution_stages(result, exp_mode):
@@ -487,7 +460,8 @@ def build_app():
             gr.Markdown(
                 "**You only need one credential source.** Fill **at least one**: **OpenRouter**, "
                 "**Google (Gemini) API key**, or **Vertex AI project settings**. "
-                "If OpenRouter and Gemini/Vertex are both configured, OpenRouter is preferred for automatic routing when available."
+                "If multiple providers are configured, OpenRouter is preferred for automatic routing when available. "
+                "To force your OpenAI-compatible gateway for a specific model, prefix it with `openai/`."
             )
             with gr.Row():
                 openrouter_key_input = gr.Textbox(
