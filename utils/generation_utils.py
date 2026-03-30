@@ -19,6 +19,7 @@ Utility functions for interacting with Gemini and Claude APIs, image processing,
 import json
 import asyncio
 import base64
+import re
 from io import BytesIO
 from functools import partial
 from ast import literal_eval
@@ -887,38 +888,146 @@ def _resolve_provider_and_model_name(model_name: str) -> tuple[str, str]:
     )
 
 
-def _extract_first_b64_image_from_openai_compatible_response(data: Dict[str, Any]) -> str:
-    """Extract base64 image payload from OpenAI-compatible chat completion response JSON."""
-    choices = data.get("choices", [])
-    if not choices:
-        return ""
+def _looks_like_http_url(value: str) -> bool:
+    return value.startswith("http://") or value.startswith("https://")
 
-    message = choices[0].get("message", {})
-    content = message.get("content")
-    if isinstance(content, list):
-        for part in content:
-            if isinstance(part, dict) and "inline_data" in part:
-                b64_data = part["inline_data"].get("data", "")
-                if b64_data:
-                    return b64_data
-            if isinstance(part, dict) and part.get("type") == "output_text":
-                text = part.get("text", "")
-                if isinstance(text, str) and text.startswith("data:image") and "," in text:
-                    return text.split(",", 1)[1]
 
-    images = message.get("images")
-    if images and len(images) > 0:
-        img_item = images[0]
-        if isinstance(img_item, dict):
-            data_url = img_item.get("image_url", {}).get("url", "")
-        else:
-            data_url = str(img_item)
-        if data_url:
-            return data_url.split(",", 1)[1] if "," in data_url else data_url
+def _extract_url_from_markdown(value: str) -> str:
+    match = re.search(r"!\[[^\]]*\]\((https?://[^)\s]+)\)", value)
+    return match.group(1) if match else ""
 
-    if isinstance(content, str) and content.startswith("data:image"):
-        return content.split(",", 1)[1] if "," in content else content
 
+def _extract_data_url_b64(value: str) -> str:
+    if value.startswith("data:image"):
+        return value.split(",", 1)[1] if "," in value else value
+    return ""
+
+
+def _extract_first_image_ref_from_obj(obj: Any) -> tuple[str, str]:
+    """Return ('b64'|'url'|'', value) from many OpenAI-compatible/New API shapes."""
+    if obj is None:
+        return "", ""
+
+    if isinstance(obj, str):
+        value = obj.strip()
+        if not value:
+            return "", ""
+
+        data_b64 = _extract_data_url_b64(value)
+        if data_b64:
+            return "b64", data_b64
+
+        if _looks_like_http_url(value):
+            return "url", value
+
+        md_url = _extract_url_from_markdown(value)
+        if md_url:
+            return "url", md_url
+
+        normalized = value
+        if value.startswith("```") and value.endswith("```"):
+            normalized = re.sub(r"^```[a-zA-Z0-9_-]*\n?", "", value)
+            normalized = re.sub(r"\n?```$", "", normalized).strip()
+
+        if normalized.startswith("{") or normalized.startswith("["):
+            try:
+                parsed = json.loads(normalized)
+            except Exception:
+                return "", ""
+            return _extract_first_image_ref_from_obj(parsed)
+
+        return "", ""
+
+    if isinstance(obj, list):
+        for item in obj:
+            ref_type, ref_value = _extract_first_image_ref_from_obj(item)
+            if ref_type:
+                return ref_type, ref_value
+        return "", ""
+
+    if isinstance(obj, dict):
+        if isinstance(obj.get("b64_json"), str) and obj.get("b64_json"):
+            return "b64", obj["b64_json"]
+
+        inline_data = obj.get("inline_data")
+        if isinstance(inline_data, dict):
+            data_value = inline_data.get("data", "")
+            if isinstance(data_value, str) and data_value:
+                return "b64", data_value
+
+        for key_path in (
+            ("image_url", "url"),
+            ("file", "url"),
+        ):
+            nested = obj
+            valid = True
+            for key in key_path:
+                if isinstance(nested, dict) and key in nested:
+                    nested = nested[key]
+                else:
+                    valid = False
+                    break
+            if valid:
+                ref_type, ref_value = _extract_first_image_ref_from_obj(nested)
+                if ref_type:
+                    return ref_type, ref_value
+
+        for key in (
+            "url",
+            "uri",
+            "text",
+            "content",
+            "images",
+            "image",
+            "output",
+            "data",
+            "message",
+            "choices",
+            "candidates",
+            "parts",
+            "result",
+        ):
+            if key in obj:
+                ref_type, ref_value = _extract_first_image_ref_from_obj(obj[key])
+                if ref_type:
+                    return ref_type, ref_value
+
+        for value in obj.values():
+            ref_type, ref_value = _extract_first_image_ref_from_obj(value)
+            if ref_type:
+                return ref_type, ref_value
+
+    return "", ""
+
+
+async def _download_image_url_as_b64(url: str) -> str:
+    """Download an image URL and return base64 bytes."""
+    async with httpx.AsyncClient(timeout=300, follow_redirects=True) as client:
+        resp = await client.get(url)
+    resp.raise_for_status()
+
+    content_type = (resp.headers.get("content-type") or "").lower()
+    data = resp.content
+    if content_type.startswith("image/"):
+        return base64.b64encode(data).decode("utf-8")
+
+    if data.startswith(b"\x89PNG") or data.startswith(b"\xff\xd8\xff") or data.startswith(b"GIF87a") or data.startswith(b"GIF89a") or data.startswith(b"RIFF"):
+        return base64.b64encode(data).decode("utf-8")
+
+    return ""
+
+
+async def extract_first_b64_image_from_openai_compatible_response(data: Dict[str, Any]) -> str:
+    """Extract base64 image payload from many OpenAI-compatible/New API response formats."""
+    ref_type, ref_value = _extract_first_image_ref_from_obj(data)
+    if ref_type == "b64":
+        return ref_value
+    if ref_type == "url":
+        try:
+            return await _download_image_url_as_b64(ref_value)
+        except Exception as e:
+            print(f"[Warning]: failed to download generated image URL: {e}")
+            return ""
     return ""
 
 
@@ -978,11 +1087,20 @@ async def call_openai_compatible_image_generation_with_retry_async(
             resp.raise_for_status()
             data = resp.json()
 
-            b64_data = _extract_first_b64_image_from_openai_compatible_response(data)
+            b64_data = await extract_first_b64_image_from_openai_compatible_response(data)
             if b64_data:
                 return [b64_data]
 
-            print(f"[Warning]: {provider_label} image generation returned no images, retrying...")
+            choices = data.get("choices", [])
+            message_keys = []
+            if choices and isinstance(choices[0], dict):
+                message = choices[0].get("message", {})
+                if isinstance(message, dict):
+                    message_keys = list(message.keys())
+            print(
+                f"[Warning]: {provider_label} image generation returned no images, "
+                f"retrying... top-level keys={list(data.keys())}, message keys={message_keys}"
+            )
             if attempt < max_attempts - 1:
                 await asyncio.sleep(retry_delay)
             continue
